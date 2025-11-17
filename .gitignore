@@ -4,7 +4,6 @@ __pycache__/
 *$py.class
 
 
-./data/nist*.db
 
 # C extensions
 *.so
