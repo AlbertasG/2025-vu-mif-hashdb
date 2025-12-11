@@ -11,14 +11,25 @@ import (
 )
 
 type FileData struct {
-	FileName  string `json:"file_name"`
-	FileSize  int64  `json:"file_size"`
-	PackageID int64  `json:"package_id"`
+	SHA256           string `json:"sha256"`
+	SHA1             string `json:"sha1"`
+	MD5              string `json:"md5"`
+	CRC32            string `json:"crc32"`
+	FileName         string `json:"file_name"`
+	FileSize         int64  `json:"file_size"`
+	PackageID        int64  `json:"package_id"`
+	PackageName      string `json:"package_name"`
+	PackageVersion   string `json:"package_version"`
+	Language         string `json:"language"`
+	ApplicationType  string `json:"application_type"`
+	OSName           string `json:"os_name"`
+	OSVersion        string `json:"os_version"`
+	ManufacturerName string `json:"manufacturer_name"`
 }
 
 func main() {
 	// Open SQLite
-	sqliteDB, err := sql.Open("sqlite3", "data/nist_rds_subset_50mb.db")
+	sqliteDB, err := sql.Open("sqlite3", "data/nist_rds_subset.db")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -42,8 +53,22 @@ func main() {
 
 	wo := grocksdb.NewDefaultWriteOptions()
 
-	// Query all files
-	rows, err := sqliteDB.Query("SELECT sha256, sha1, md5, crc32, file_name, file_size, package_id FROM FILE")
+	// Query all files with JOINs to get complete information
+	query := `
+		SELECT 
+			f.sha256, f.sha1, f.md5, f.crc32, 
+			f.file_name, f.file_size, f.package_id,
+			p.name as package_name, p.version as package_version, 
+			p.language, p.application_type,
+			o.name as os_name, o.version as os_version,
+			m.name as manufacturer_name
+		FROM FILE f
+		LEFT JOIN PKG p ON f.package_id = p.package_id
+		LEFT JOIN OS o ON p.operating_system_id = o.operating_system_id 
+			AND p.manufacturer_id = o.manufacturer_id
+		LEFT JOIN MFG m ON o.manufacturer_id = m.manufacturer_id
+	`
+	rows, err := sqliteDB.Query(query)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -52,20 +77,38 @@ func main() {
 	count := 0
 	for rows.Next() {
 		var sha256, sha1, md5, crc32, fileName string
+		var packageName, packageVersion, language, applicationType string
+		var osName, osVersion, manufacturerName string
 		var fileSize, packageID int64
 
-		if err := rows.Scan(&sha256, &sha1, &md5, &crc32, &fileName, &fileSize, &packageID); err != nil {
+		if err := rows.Scan(
+			&sha256, &sha1, &md5, &crc32,
+			&fileName, &fileSize, &packageID,
+			&packageName, &packageVersion, &language, &applicationType,
+			&osName, &osVersion, &manufacturerName,
+		); err != nil {
 			log.Fatal(err)
 		}
 
 		// Key = joined hashes
 		key := sha256 + sha1 + md5 + crc32
 
-		// Value = JSON of file data
+		// Value = JSON of file data with all related information
 		data := FileData{
-			FileName:  fileName,
-			FileSize:  fileSize,
-			PackageID: packageID,
+			SHA256:           sha256,
+			SHA1:             sha1,
+			MD5:              md5,
+			CRC32:            crc32,
+			FileName:         fileName,
+			FileSize:         fileSize,
+			PackageID:        packageID,
+			PackageName:      packageName,
+			PackageVersion:   packageVersion,
+			Language:         language,
+			ApplicationType:  applicationType,
+			OSName:           osName,
+			OSVersion:        osVersion,
+			ManufacturerName: manufacturerName,
 		}
 		value, _ := json.Marshal(data)
 

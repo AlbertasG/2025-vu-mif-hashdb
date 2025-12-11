@@ -13,9 +13,20 @@ import (
 )
 
 type FileData struct {
-	FileName  string `json:"file_name"`
-	FileSize  int64  `json:"file_size"`
-	PackageID int64  `json:"package_id"`
+	SHA256           string `json:"sha256"`
+	SHA1             string `json:"sha1"`
+	MD5              string `json:"md5"`
+	CRC32            string `json:"crc32"`
+	FileName         string `json:"file_name"`
+	FileSize         int64  `json:"file_size"`
+	PackageID        int64  `json:"package_id"`
+	PackageName      string `json:"package_name"`
+	PackageVersion   string `json:"package_version"`
+	Language         string `json:"language"`
+	ApplicationType  string `json:"application_type"`
+	OSName           string `json:"os_name"`
+	OSVersion        string `json:"os_version"`
+	ManufacturerName string `json:"manufacturer_name"`
 }
 
 func main() {
@@ -74,7 +85,29 @@ func lookup(db *grocksdb.DB, ro *grocksdb.ReadOptions, hash string) {
 		if strings.HasPrefix(key, hash) {
 			var data FileData
 			json.Unmarshal(iter.Value().Data(), &data)
-			fmt.Printf("FOUND %s -> %s (%d bytes)\n", hash, data.FileName, data.FileSize)
+			fmt.Printf("FOUND %s\n", hash)
+			fmt.Printf("  File: %s (%d bytes)\n", data.FileName, data.FileSize)
+			fmt.Printf("  SHA256: %s\n", data.SHA256)
+			fmt.Printf("  SHA1:   %s\n", data.SHA1)
+			fmt.Printf("  MD5:    %s\n", data.MD5)
+			fmt.Printf("  CRC32:  %s\n", data.CRC32)
+			if data.PackageName != "" {
+				fmt.Printf("  Package: %s %s (ID: %d)\n", data.PackageName, data.PackageVersion, data.PackageID)
+			} else {
+				fmt.Printf("  Package ID: %d\n", data.PackageID)
+			}
+			if data.Language != "" {
+				fmt.Printf("  Language: %s\n", data.Language)
+			}
+			if data.ApplicationType != "" {
+				fmt.Printf("  Type: %s\n", data.ApplicationType)
+			}
+			if data.OSName != "" {
+				fmt.Printf("  OS: %s %s\n", data.OSName, data.OSVersion)
+			}
+			if data.ManufacturerName != "" {
+				fmt.Printf("  Manufacturer: %s\n", data.ManufacturerName)
+			}
 			return
 		}
 	}
