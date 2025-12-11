@@ -1,4 +1,10 @@
-// To run: go run hashdb.go -f test_hashes.txt
+// Usage:
+//   hashdb <sha256> <sha1> <md5> <crc32>   - Exact lookup (uses bloom filter)
+//   hashdb -f <file>                        - Bulk lookup from file
+//
+// File format for bulk lookup:
+//   # Comment lines start with #
+//   SHA256,SHA1,MD5,CRC32                   - Comma-separated hashes per line
 
 package main
 
@@ -31,7 +37,7 @@ type FileData struct {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: hashdb <hash> or hashdb -f <file>")
+		printUsage()
 		os.Exit(1)
 	}
 
@@ -61,56 +67,87 @@ func main() {
 
 		scanner := bufio.NewScanner(file)
 		for scanner.Scan() {
-			hash := strings.ToUpper(strings.TrimSpace(scanner.Text()))
-			if hash != "" && !strings.HasPrefix(hash, "#") {
-				lookup(db, ro, hash)
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			
+			parts := strings.Split(line, ",")
+			if len(parts) == 4 {
+				lookup(db, ro, 
+					strings.ToUpper(strings.TrimSpace(parts[0])),
+					strings.ToUpper(strings.TrimSpace(parts[1])),
+					strings.ToUpper(strings.TrimSpace(parts[2])),
+					strings.ToUpper(strings.TrimSpace(parts[3])))
+			} else {
+				fmt.Fprintf(os.Stderr, "Invalid line (need SHA256,SHA1,MD5,CRC32): %s\n", line)
 			}
 		}
 		return
 	}
 
-	// Single hash lookup
-	hash := strings.ToUpper(strings.TrimSpace(os.Args[1]))
-	lookup(db, ro, hash)
-}
-
-func lookup(db *grocksdb.DB, ro *grocksdb.ReadOptions, hash string) {
-	// SHA256 prefix lookup
-	iter := db.NewIterator(ro)
-	defer iter.Close()
-
-	iter.Seek([]byte(hash))
-	if iter.Valid() {
-		key := string(iter.Key().Data())
-		if strings.HasPrefix(key, hash) {
-			var data FileData
-			json.Unmarshal(iter.Value().Data(), &data)
-			fmt.Printf("FOUND %s\n", hash)
-			fmt.Printf("  File: %s (%d bytes)\n", data.FileName, data.FileSize)
-			fmt.Printf("  SHA256: %s\n", data.SHA256)
-			fmt.Printf("  SHA1:   %s\n", data.SHA1)
-			fmt.Printf("  MD5:    %s\n", data.MD5)
-			fmt.Printf("  CRC32:  %s\n", data.CRC32)
-			if data.PackageName != "" {
-				fmt.Printf("  Package: %s %s (ID: %d)\n", data.PackageName, data.PackageVersion, data.PackageID)
-			} else {
-				fmt.Printf("  Package ID: %d\n", data.PackageID)
-			}
-			if data.Language != "" {
-				fmt.Printf("  Language: %s\n", data.Language)
-			}
-			if data.ApplicationType != "" {
-				fmt.Printf("  Type: %s\n", data.ApplicationType)
-			}
-			if data.OSName != "" {
-				fmt.Printf("  OS: %s %s\n", data.OSName, data.OSVersion)
-			}
-			if data.ManufacturerName != "" {
-				fmt.Printf("  Manufacturer: %s\n", data.ManufacturerName)
-			}
-			return
-		}
+	// Exact lookup with all 4 hashes
+	if len(os.Args) == 5 {
+		sha256 := strings.ToUpper(strings.TrimSpace(os.Args[1]))
+		sha1 := strings.ToUpper(strings.TrimSpace(os.Args[2]))
+		md5 := strings.ToUpper(strings.TrimSpace(os.Args[3]))
+		crc32 := strings.ToUpper(strings.TrimSpace(os.Args[4]))
+		lookup(db, ro, sha256, sha1, md5, crc32)
+		return
 	}
 
-	fmt.Printf("NOT FOUND %s\n", hash)
+	printUsage()
+	os.Exit(1)
+}
+
+func printUsage() {
+	fmt.Println("Usage:")
+	fmt.Println("  hashdb <sha256> <sha1> <md5> <crc32>   - Exact lookup")
+	fmt.Println("  hashdb -f <file>                       - Bulk lookup from file")
+	fmt.Println()
+	fmt.Println("File format (comma-separated):")
+	fmt.Println("  SHA256,SHA1,MD5,CRC32")
+}
+
+func lookup(db *grocksdb.DB, ro *grocksdb.ReadOptions, sha256, sha1, md5, crc32 string) {
+	key := sha256 + sha1 + md5 + crc32
+	
+	value, err := db.Get(ro, []byte(key))
+	if err != nil {
+		fmt.Printf("ERROR: %v\n", err)
+		return
+	}
+	defer value.Free()
+
+	if !value.Exists() {
+		fmt.Printf("NOT FOUND %s\n", sha256)
+		return
+	}
+
+	var data FileData
+	json.Unmarshal(value.Data(), &data)
+	
+	fmt.Printf("FOUND %s\n", sha256)
+	fmt.Printf("  File: %s (%d bytes)\n", data.FileName, data.FileSize)
+	fmt.Printf("  SHA256: %s\n", data.SHA256)
+	fmt.Printf("  SHA1:   %s\n", data.SHA1)
+	fmt.Printf("  MD5:    %s\n", data.MD5)
+	fmt.Printf("  CRC32:  %s\n", data.CRC32)
+	if data.PackageName != "" {
+		fmt.Printf("  Package: %s %s (ID: %d)\n", data.PackageName, data.PackageVersion, data.PackageID)
+	} else {
+		fmt.Printf("  Package ID: %d\n", data.PackageID)
+	}
+	if data.Language != "" {
+		fmt.Printf("  Language: %s\n", data.Language)
+	}
+	if data.ApplicationType != "" {
+		fmt.Printf("  Type: %s\n", data.ApplicationType)
+	}
+	if data.OSName != "" {
+		fmt.Printf("  OS: %s %s\n", data.OSName, data.OSVersion)
+	}
+	if data.ManufacturerName != "" {
+		fmt.Printf("  Manufacturer: %s\n", data.ManufacturerName)
+	}
 }

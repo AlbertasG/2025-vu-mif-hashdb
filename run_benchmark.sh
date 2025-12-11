@@ -52,10 +52,9 @@ else
 fi
 echo ""
 echo "This will test:"
-echo "  1. SQLite with JOINs"
-echo "  2. RocksDB Iterator (prefix lookup)"
-echo "  3. RocksDB Get with Bloom filter"
-echo "  4. RocksDB Get without Bloom filter"
+echo "  1. SQLite (exact match)"
+echo "  2. RocksDB WITH Bloom filter"
+echo "  3. RocksDB WITHOUT Bloom filter"
 echo ""
 echo "Please wait..."
 echo ""

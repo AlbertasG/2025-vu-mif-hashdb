@@ -141,14 +141,9 @@ func main() {
 	// Run benchmarks
 	results := []BenchmarkResult{}
 
-	fmt.Println("=== PREFIX LOOKUP (Iterator Seek) - Your current use case ===")
 	fmt.Println("Running SQLite benchmark...")
 	results = append(results, benchmarkSQLite(testHashes))
 
-	fmt.Println("Running RocksDB Iterator (no Bloom filter benefit)...")
-	results = append(results, benchmarkRocksDBIterator(testHashes))
-
-	fmt.Println("\n=== EXACT KEY LOOKUP (Get) - Shows Bloom filter benefit ===")
 	fmt.Println("Running RocksDB Get WITH Bloom filter...")
 	results = append(results, benchmarkRocksDBGet(testHashes, true))
 
@@ -160,9 +155,12 @@ func main() {
 }
 
 type TestHash struct {
-	SHA256  string // For prefix lookup
-	FullKey string // For exact key lookup (sha256+sha1+md5+crc32)
-	Exists  bool   // Whether this hash exists in DB
+	SHA256  string
+	SHA1    string
+	MD5     string
+	CRC32   string
+	FullKey string
+	Exists  bool
 }
 
 func generateTestHashes(count int) []TestHash {
@@ -172,7 +170,7 @@ func generateTestHashes(count int) []TestHash {
 	}
 	defer sqliteDB.Close()
 
-	// Get random existing hashes (70% of queries) - with full key for Get() test
+	// Get random existing hashes (70% of queries)
 	existingCount := int(float64(count) * 0.7)
 	rows, err := sqliteDB.Query("SELECT sha256, sha1, md5, crc32 FROM FILE ORDER BY RANDOM() LIMIT ?", existingCount)
 	if err != nil {
@@ -186,6 +184,9 @@ func generateTestHashes(count int) []TestHash {
 		rows.Scan(&sha256, &sha1, &md5, &crc32)
 		hashes = append(hashes, TestHash{
 			SHA256:  sha256,
+			SHA1:    sha1,
+			MD5:     md5,
+			CRC32:   crc32,
 			FullKey: sha256 + sha1 + md5 + crc32,
 			Exists:  true,
 		})
@@ -194,10 +195,16 @@ func generateTestHashes(count int) []TestHash {
 	// Generate random non-existing hashes (30% of queries)
 	nonExistingCount := count - len(hashes)
 	for i := 0; i < nonExistingCount; i++ {
-		randomHash := generateRandomHash()
+		sha256 := generateRandomHash(64)
+		sha1 := generateRandomHash(40)
+		md5 := generateRandomHash(32)
+		crc32 := generateRandomHash(8)
 		hashes = append(hashes, TestHash{
-			SHA256:  randomHash,
-			FullKey: randomHash + generateRandomHash()[:40] + generateRandomHash()[:32] + generateRandomHash()[:8],
+			SHA256:  sha256,
+			SHA1:    sha1,
+			MD5:     md5,
+			CRC32:   crc32,
+			FullKey: sha256 + sha1 + md5 + crc32,
 			Exists:  false,
 		})
 	}
@@ -211,9 +218,9 @@ func generateTestHashes(count int) []TestHash {
 	return hashes
 }
 
-func generateRandomHash() string {
+func generateRandomHash(length int) string {
 	const chars = "0123456789ABCDEF"
-	hash := make([]byte, 64) // SHA256 length
+	hash := make([]byte, length)
 	for i := range hash {
 		hash[i] = chars[rand.Intn(len(chars))]
 	}
@@ -240,7 +247,7 @@ func benchmarkSQLite(testHashes []TestHash) BenchmarkResult {
 		LEFT JOIN OS o ON p.operating_system_id = o.operating_system_id 
 			AND p.manufacturer_id = o.manufacturer_id
 		LEFT JOIN MFG m ON o.manufacturer_id = m.manufacturer_id
-		WHERE f.sha256 = ?
+		WHERE f.sha256 = ? AND f.sha1 = ? AND f.md5 = ? AND f.crc32 = ?
 	`
 
 	stmt, err := sqliteDB.Prepare(query)
@@ -250,7 +257,7 @@ func benchmarkSQLite(testHashes []TestHash) BenchmarkResult {
 	defer stmt.Close()
 
 	result := BenchmarkResult{
-		Name:         "SQLite (with JOINs)",
+		Name:         "SQLite (exact match)",
 		TotalQueries: len(testHashes),
 		MinTime:      time.Hour,
 		MaxTime:      0,
@@ -259,7 +266,7 @@ func benchmarkSQLite(testHashes []TestHash) BenchmarkResult {
 	start := time.Now()
 	for _, th := range testHashes {
 		queryStart := time.Now()
-		rows, err := stmt.Query(th.SHA256)
+		rows, err := stmt.Query(th.SHA256, th.SHA1, th.MD5, th.CRC32)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -298,68 +305,6 @@ func benchmarkSQLite(testHashes []TestHash) BenchmarkResult {
 	return result
 }
 
-// benchmarkRocksDBIterator tests prefix lookup using iterator (Bloom filter doesn't help here)
-func benchmarkRocksDBIterator(testHashes []TestHash) BenchmarkResult {
-	opts := grocksdb.NewDefaultOptions()
-	// No bloom filter for iterator - it doesn't help
-	
-	if useDirectIO {
-		opts.SetUseDirectReads(true)
-	}
-
-	db, err := grocksdb.OpenDbForReadOnly(opts, "data/nist_rds_rocksdb", false)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
-
-	ro := grocksdb.NewDefaultReadOptions()
-
-	result := BenchmarkResult{
-		Name:         "RocksDB Iterator (prefix lookup)",
-		TotalQueries: len(testHashes),
-		MinTime:      time.Hour,
-		MaxTime:      0,
-	}
-
-	// Create iterator once and reuse it (best practice)
-	iter := db.NewIterator(ro)
-	defer iter.Close()
-
-	start := time.Now()
-	for _, th := range testHashes {
-		queryStart := time.Now()
-		
-		iter.Seek([]byte(th.SHA256))
-		
-		found := false
-		if iter.Valid() {
-			key := string(iter.Key().Data())
-			if strings.HasPrefix(key, th.SHA256) {
-				found = true
-				var data FileData
-				json.Unmarshal(iter.Value().Data(), &data)
-			}
-		}
-
-		queryTime := time.Since(queryStart)
-		if found {
-			result.FoundCount++
-		}
-		if queryTime < result.MinTime {
-			result.MinTime = queryTime
-		}
-		if queryTime > result.MaxTime {
-			result.MaxTime = queryTime
-		}
-	}
-	result.TotalTime = time.Since(start)
-	result.AvgTime = result.TotalTime / time.Duration(result.TotalQueries)
-
-	return result
-}
-
-// benchmarkRocksDBGet tests exact key lookup using Get() - Bloom filter helps here!
 func benchmarkRocksDBGet(testHashes []TestHash, useBloomFilter bool) BenchmarkResult {
 	opts := grocksdb.NewDefaultOptions()
 	
@@ -367,7 +312,7 @@ func benchmarkRocksDBGet(testHashes []TestHash, useBloomFilter bool) BenchmarkRe
 		opts.SetUseDirectReads(true)
 	}
 	
-	name := "RocksDB Get WITH Bloom filter"
+	name := "RocksDB WITH Bloom filter"
 	
 	if useBloomFilter {
 		bbto := grocksdb.NewDefaultBlockBasedTableOptions()
@@ -375,7 +320,7 @@ func benchmarkRocksDBGet(testHashes []TestHash, useBloomFilter bool) BenchmarkRe
 		bbto.SetCacheIndexAndFilterBlocks(true)
 		opts.SetBlockBasedTableFactory(bbto)
 	} else {
-		name = "RocksDB Get WITHOUT Bloom filter"
+		name = "RocksDB WITHOUT Bloom filter"
 	}
 
 	db, err := grocksdb.OpenDbForReadOnly(opts, "data/nist_rds_rocksdb", false)
@@ -397,7 +342,6 @@ func benchmarkRocksDBGet(testHashes []TestHash, useBloomFilter bool) BenchmarkRe
 	for _, th := range testHashes {
 		queryStart := time.Now()
 		
-		// Use Get() for exact key lookup - this is where Bloom filter shines
 		value, err := db.Get(ro, []byte(th.FullKey))
 		
 		found := false
@@ -474,4 +418,3 @@ func getSpeedupEmoji(speedup float64) string {
 	}
 	return "🐌"
 }
-
