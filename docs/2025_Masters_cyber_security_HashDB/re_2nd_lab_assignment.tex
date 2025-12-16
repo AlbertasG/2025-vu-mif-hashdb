@@ -1,0 +1,418 @@
+\documentclass[
+    english, % thesis will be in english
+    % signatureplaces, % adds signature places in the title page
+    monochrome, % makes all link colors black
+]{VUMIFSEMasterThesis}
+\usepackage{float}
+\usepackage{wrapfig2}
+\usepackage{hyperref}
+\usepackage{algorithmicx}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{bm}
+\usepackage{caption}
+\usepackage{color}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{subcaption}
+\usepackage{biblatex}
+\usepackage{array}
+\usepackage{multicol}
+\usepackage{longtable}
+\usepackage{multirow}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{makecell}
+
+% Title page
+\university{Vilnius University}
+\faculty{Faculty of Mathematics and Informatics}
+\department{Software Systems Department}
+\papertype{Course: Cyber Security Technologies, 2025 Masters PS + KM}
+\title{HashDB}
+\titleineng{Fast lookup of known files hashes database}
+\author{\\ Žygimantas Remeika
+&\; Albertas Grinkevičius\hfill\\}
+
+\begin{document}
+\maketitle
+
+\sectionnonum{Summary}
+The purpose of this project was to develop an application that would allow fast lookup of the hash database. In digital forensics and cyber security, security engineers to save compute and human resources use collections of already known and approved files (OS, apps) with their respective hashes and metadata to filter them out from scans. Those files come from legitimate verified publishers and known software developers or distributors. Examples include the Linux Foundation, Microsoft, Oracle, and IBM. The National Institute of Standards and Technology (NIST) database is the National Software Reference Library (NSRL) Reference Data Set (RDS). The dataset contains more than 500GB of hashes with metadata. This poses a challenge as keeping 500GB of data in memory is costly, while scanning the full file on every lookup would be slow and inefficient.
+
+\subsectionnonum{Team contacts}
+\begin{enumerate}
+    \item Žygimantas Remeika - zygimantas.remeika@mif.stud.vu.lt 
+    \item Albertas Grinkevičius - albertas.grinkevicius@mif.stud.vu.lt
+\end{enumerate}
+
+\tableofcontents
+
+\sectionnonum{Introduction}
+In the field of digital forensics, investigators are often faced with the "needle in a haystack" problem. When analyzing a seized hard drive or a compromised server, the storage media may contain millions of individual files. The vast majority of these files are standard, non-malicious operating system components or common application files (e.g., Microsoft Windows system DLLs, Linux kernel modules, or browser executables). Analyzing every single file manually or scanning them all for malware consumes vast amounts of computing power and human time.
+
+To solve this, the industry uses a technique called "Known File Filtering" or "Allowlisting." This involves computing the cryptographic hash (a digital fingerprint) of every file on the disk and comparing it against a reference database of known good files. If a file's hash matches a known safe file from a trusted vendor (like Microsoft or Adobe), it can be safely ignored, allowing investigators to focus only on the unknown or suspicious files.
+
+The primary source for this data is the National Software Reference Library (NSRL) Reference Data Set (RDS), maintained by NIST. The modern dataset is massive, containing billions of records which can exceed 1TB of data when fully expanded. Currently, this dataset is distributed as a complex SQLite database. While SQLite is excellent for compatibility, it is not optimized for the high-speed, bulk lookups required in modern forensic scenarios. The core technical challenge of this project involves migrating this dataset of high cardinality from a Relational Database Management System (RDBMS) to a high-performance Key-Value (KV) store to achieve sub-millisecond lookup speeds.
+
+\section{Baseline NIST RDS SQLite}
+The baseline implementation provided by NIST uses SQLite. This is a standard Relational Database Management System (RDBMS) that organizes data using B-Trees (or B+ Trees). While SQLite is reliable, its internal architecture creates significant performance bottlenecks when dealing with a dataset of this magnitude for read-heavy workloads.
+
+\subsection{Database Normalization and Joins}
+The NSRL dataset is highly "normalized" to save storage space. Normalization means that data is split into many separate tables to avoid repetition. For example, the filename \texttt{kernel32.dll} appears in millions of different software packages. Instead of writing "\texttt{kernel32.dll}" millions of times, SQLite stores it once in a \texttt{FILE\_NAME} table and other tables reference it using numeric IDs (Foreign Keys).
+
+While this is efficient for storage, it imposes a massive penalty during reading. To reconstruct the complete information for a single file, the database engine must find data in the \texttt{FILE} table, then jump to the \texttt{PKG} (Package) table, then the \texttt{OS} (Operating System) table, and finally the \texttt{MFG} (Manufacturer) table. This process is called a \texttt{JOIN}.
+\begin{equation}
+    \text{Query Cost} \approx \text{Cost}(FILE) + \text{Cost}(PKG) + \text{Cost}(OS) + \text{Cost}(MFG)
+\end{equation}
+In computational terms, the CPU has to work much harder to assemble these pieces every single time a lookup is requested.
+
+\subsection{B-Tree Limitations}
+SQLite uses B-Trees to index data. A B-Tree is a hierarchical structure. To find a specific record, the database must start at the "root" of the tree and traverse down through several layers of "branch" nodes until it reaches the "leaf" node containing the data. 
+
+\begin{itemize}
+    \item \textbf{Computational Complexity:} A B-Tree lookup has a complexity of $\mathcal{O}(\log n)$. As the number of records ($n$) grows into the billions, the tree becomes deeper, requiring more steps to find a record.
+    \item \textbf{Random I/O:} Each step down the B-Tree often requires fetching a different "page" of data from the hard disk. These pages are often scattered across the disk, leading to "random I/O" operations. Standard hard drives and even SSDs are significantly slower at random reads compared to sequential reads.
+\end{itemize}
+
+For a forensic scan requiring millions of lookups, these B-Tree traversals and JOIN operations accumulate, making the baseline SQLite solution too slow for real-time applications.
+
+\section{Target Key-Value store with RocksDB}
+The RocksDB implementation shifts to a denormalized model. Instead of reconstructing data at read time, data is pre-joined during the migration phase. The \texttt{migrate\_to\_rocksdb.go} code demonstrates this by executing the complex JOIN query once, marshaling the result into a static JSON blob (the \texttt{FileData} struct), and storing it contiguously on disk. This trades write-time CPU (during the build) for read-time speed. The retrieval complexity drops to $\mathcal{O}(1)$—a direct hash lookup—eliminating the CPU cycles previously spent on join logic.
+
+\subsection{Log-Structured Merge-Trees (LSM-Trees)}
+The choice of RocksDB introduces a specific storage engine architecture known as the Log-Structured Merge-tree (LSM-Tree), which differs fundamentally from the page-based B-Trees of SQLite.
+
+In a B-Tree, an insert often requires a "random write" to update a specific page on the disk. In contrast, the LSM-Tree organizes data into two primary structures:
+\begin{itemize}
+    \item \textbf{MemTable (Memory):} New data is written to an in-memory buffer (typically a Skip List). This makes inserts extremely fast as they do not immediately touch the disk.
+    \item \textbf{SSTable (Sorted String Table):} When the MemTable fills, it is flushed to disk as an immutable file. Because the data was sorted in memory, this flush is a "sequential write," which is significantly faster than random writes on physical storage media (SSDs/HDDs).
+\end{itemize}
+
+\subsection{Compaction}
+Because data is constantly appended to new files, older versions of data (or deleted keys) may persist in older SSTables. RocksDB employs a background process called Compaction to merge these files, discard obsolete data, and maintain read efficiency. This ensures that the dataset remains optimized for storage without blocking reads.
+
+\section{Probabilistic Data Structure: Bloom Filter}
+The reference code explicitly configures a Bloom Filter with 10 bits per key (\texttt{bbto.SetFilterPolicy(grocksdb.NewBloomFilter(10))}). This is the critical theoretical component for optimizing "negative lookups" (checking a hash that is not in the database).
+
+A Bloom Filter is a space-efficient probabilistic data structure representing a set. It consists of a bit array of $m$ bits, initially all set to 0. When a key $K$ is added:
+
+\begin{itemize}
+    \item The system calculates $k$ distinct hash functions \((h_1(K), h_2(K), \ldots, h_k(K))\).
+    \item Each function outputs an index position in the array.
+    \item The bits at these positions are flipped to 1.
+\end{itemize}
+
+\subsection{False Positives}
+If any of the bits at the calculated positions are 0, the element is definitely not in the set. This allows RocksDB to return "Not Found" instantly from RAM, bypassing expensive disk I/O entirely. If all bits are 1, the element might be in the set. The system must then read the SSTable from disk to confirm. 
+
+In forensic scanning, a "whitelist" check often involves querying massive numbers of safe files (which exist) and unknown files (which do not). Without a Bloom Filter, every "unknown" file would force the database to scan the disk to confirm its absence. The Bloom Filter reduces the disk I/O for these negative lookups to near zero.
+
+\subsection{Key Design}
+The implementation in \texttt{migrate\_to\_rocksdb.go} utilizes a Composite Key strategy: 
+\begin{equation}
+\texttt{key} := \texttt{sha256} + \texttt{sha1} + \texttt{md5} + \texttt{crc32}
+\end{equation}
+
+\textbf{Deterministic Access:} In Key-Value stores, the access pattern is strictly deterministic. Unlike SQL, where you can query \texttt{WHERE file\_size > 1000}, a KV store requires the exact key. By concatenating the hashes, the system enforces a strict lookup requirement: the client must possess all cryptographic identifiers to retrieve the metadata.
+
+\textbf{High Entropy Distribution:} Cryptographic hashes (SHA-256, MD5) are designed to output data with maximum entropy (randomness). In an LSM-Tree, this randomness ensures that keys are uniformly distributed across the storage space. This prevents "hotspots" where one specific section of the database receives all the traffic, ensuring that the heavy read load of a forensic scan is evenly balanced across the system resources.
+
+
+\section{Implementation}
+
+This section describes the design decisions and components developed for the HashDB system.
+
+\subsection{Technology Choices}
+
+\subsubsection{Programming Language: Go}
+Go was selected for implementation due to its strong performance characteristics, excellent concurrency support, and straightforward CGO integration for calling RocksDB's C++ library. The \texttt{grocksdb} package provides idiomatic Go bindings to RocksDB.
+
+\subsubsection{Serialization: JSON}
+JSON was chosen for value serialization over binary formats (Protocol Buffers, MessagePack) for simplicity and debuggability. While binary formats offer better space efficiency, JSON provides human-readable output and easier debugging during development. For production deployments with the full 1TB dataset, migration to a binary format could reduce storage by approximately 30-40\%.
+
+\subsection{Denormalization Strategy}
+
+The migration process performs a single JOIN query across all four SQLite tables (FILE, PKG, OS, MFG) and stores the complete result as a single JSON document per file hash. This trades increased storage space for eliminated read-time JOIN overhead. Each lookup retrieves all metadata in a single disk operation rather than four separate B-tree traversals.
+
+\subsection{Bloom Filter Configuration}
+
+A 10-bit-per-key Bloom filter was configured based on the standard space-accuracy tradeoff. This configuration yields a theoretical false positive rate of approximately 0.82\%, meaning less than 1\% of negative lookups will require unnecessary disk reads. The filter is cached in memory (\texttt{SetCacheIndexAndFilterBlocks(true)}), ensuring that negative lookups are resolved entirely from RAM.
+
+\subsection{Project Components}
+
+The implementation consists of:
+\begin{itemize}
+    \item \texttt{migrate\_to\_rocksdb.go} -- One-time migration tool that reads SQLite, performs denormalization, and populates RocksDB
+    \item \texttt{hashdb.go} -- Command-line lookup utility supporting single queries and bulk file processing
+    \item \texttt{benchmark.go} -- Performance comparison suite testing SQLite vs RocksDB with/without Bloom filters
+\end{itemize}
+
+\section{Benchmarking}
+
+To validate the performance improvements, a comprehensive benchmarking suite was developed to compare SQLite against RocksDB with and without Bloom filters.
+
+\subsection{Benchmark Methodology}
+
+The benchmark generates a mixed workload consisting of:
+\begin{itemize}
+    \item 70\% existing records (positive lookups) -- randomly sampled from the database
+    \item 30\% non-existing records (negative lookups) -- randomly generated hash values
+\end{itemize}
+
+This distribution reflects realistic forensic scanning scenarios where most files on a system are known good files, but a significant portion are unknown and require verification.
+
+\subsubsection{Test Configurations}
+
+Three configurations were benchmarked:
+
+\begin{enumerate}
+    \item \textbf{SQLite (exact match)} -- Baseline using the normalized schema with JOIN operations
+    \item \textbf{RocksDB WITH Bloom filter} -- LSM-tree with 10-bit Bloom filter enabled
+    \item \textbf{RocksDB WITHOUT Bloom filter} -- LSM-tree without probabilistic filtering
+\end{enumerate}
+
+\subsubsection{Direct I/O Mode}
+
+The benchmark supports a \texttt{--direct-io} flag that bypasses the operating system's page cache:
+\begin{verbatim}
+./run_benchmark.sh 1000 --direct-io
+\end{verbatim}
+
+This mode provides more accurate measurements of the Bloom filter's benefit by forcing actual disk I/O operations rather than serving data from cached memory.
+
+\subsection{Running Benchmarks}
+
+Execute the benchmark suite:
+\begin{verbatim}
+./run_benchmark.sh [num_queries] [--direct-io]
+\end{verbatim}
+
+Example with 1000 queries:
+\begin{verbatim}
+./run_benchmark.sh 1000
+\end{verbatim}
+
+\subsection{Results}
+
+% ============================================================
+% INSTRUCTIONS: Replace the values below with your actual
+% benchmark results after running:
+%   ./run_benchmark.sh 1000
+% ============================================================
+
+\subsubsection{Database Statistics}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{|l|r|}
+\hline
+\textbf{Metric} & \textbf{Value} \\
+\hline
+Estimated keys & 1,911,244 \\
+Total SST files on disk & 308.69 MB \\
+Bloom filter size & 2.28 MB \\
+Bloom filter \% of DB size & 0.74\% \\
+\hline
+\end{tabular}
+\caption{RocksDB database statistics}
+\label{tab:db-stats}
+\end{table}
+
+\subsubsection{Performance Comparison}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{|l|r|r|r|r|r|}
+\hline
+\textbf{Configuration} & \textbf{Total Time} & \textbf{Avg Time} & \textbf{QPS} \\
+\hline
+SQLite (exact match) & 1,472 ms & 147.2 µs & 6,793 \\
+RocksDB + Bloom & 602 ms & 60.2 µs & 16,610 \\
+RocksDB no Bloom & 848 ms & 84.8 µs & 11,797 \\
+\hline
+\end{tabular}
+\caption{Benchmark results for 10,000 queries (70\% hits, 30\% misses) with Direct I/O enabled}
+\label{tab:benchmark-results}
+\end{table}
+
+\subsubsection{Speedup Analysis}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{|l|r|r|}
+\hline
+\textbf{Comparison} & \textbf{Speedup} & \textbf{Time Saved} \\
+\hline
+RocksDB + Bloom vs SQLite & 2.45x & 870 ms \\
+RocksDB no Bloom vs SQLite & 1.74x & 624 ms \\
+Bloom vs no Bloom & 1.41x & 246 ms \\
+\hline
+\end{tabular}
+\caption{Performance speedup comparison}
+\label{tab:speedup}
+\end{table}
+
+\subsection{Analysis}
+
+\subsubsection{SQLite Performance Bottlenecks}
+
+The SQLite implementation exhibits the highest latency due to:
+\begin{itemize}
+    \item \textbf{JOIN overhead}: Each query requires traversing four tables (FILE, PKG, OS, MFG)
+    \item \textbf{B-Tree traversal}: Multiple $\mathcal{O}(\log n)$ lookups per query
+    \item \textbf{Index fragmentation}: Random I/O patterns across scattered index pages
+\end{itemize}
+
+\subsubsection{RocksDB Advantages}
+
+The RocksDB implementation demonstrates significant improvements:
+\begin{itemize}
+    \item \textbf{Denormalized storage}: Single $\mathcal{O}(1)$ lookup per query
+    \item \textbf{Sequential I/O}: LSM-tree architecture optimizes for sequential reads
+    \item \textbf{Compressed storage}: LZ4/Snappy compression reduces I/O volume
+\end{itemize}
+
+\subsubsection{Bloom Filter Impact}
+
+The Bloom filter provides the most significant benefit for negative lookups:
+\begin{itemize}
+    \item \textbf{Memory-only rejection}: Non-existing keys are rejected without disk I/O
+    \item \textbf{False positive rate}: With 10 bits per key, the theoretical false positive rate is approximately 1\%
+    \item \textbf{Space efficiency}: The filter requires only $\frac{n \times 10}{8}$ bytes of memory
+\end{itemize}
+
+The theoretical false positive probability for a Bloom filter is:
+\begin{equation}
+    P_{fp} = \left(1 - e^{-kn/m}\right)^k
+\end{equation}
+where $k$ is the number of hash functions, $n$ is the number of elements, and $m$ is the number of bits. For 10 bits per key with optimal $k \approx 7$:
+\begin{equation}
+    P_{fp} \approx 0.0082 \approx 0.82\%
+\end{equation}
+
+\subsection{Conclusions}
+
+The benchmarking results demonstrate that migrating from SQLite to RocksDB with Bloom filters provides substantial performance improvements for hash database lookups. The combination of denormalized storage, LSM-tree architecture, and probabilistic filtering makes this approach well-suited for high-throughput forensic scanning applications.
+
+Key findings:
+\begin{enumerate}
+    \item RocksDB with Bloom filter achieves \textbf{2.45x speedup} over SQLite, processing 16,610 queries per second compared to SQLite's 6,793
+    \item Even without Bloom filters, RocksDB outperforms SQLite by \textbf{1.74x} due to denormalization eliminating JOIN overhead
+    \item The Bloom filter provides an additional \textbf{1.41x improvement} over RocksDB without filtering, demonstrating its effectiveness for rejecting negative lookups
+    \item The Bloom filter requires only \textbf{2.28 MB} (0.74\% of database size) while dramatically reducing disk I/O for non-existing keys
+    \item Minimum query time dropped from 12 µs (SQLite) to sub-microsecond (833 ns) with RocksDB + Bloom filter
+\end{enumerate}
+
+\section{Estimates on full NIST RDS production dataset}
+
+This section calculates the storage and hardware resources needed to deploy the HashDB application using the full NIST NSRL Reference Data Set (RDS). We used performance data from our initial pilot test (which used a subset of 1.9 million keys) to estimate the requirements for the full production dataset (estimated at 162--280 million unique keys).
+
+\subsection{Source Data Storage Requirements}
+Before the data can be inserted into RocksDB store, we need enough disk space to download and uncompress initial NIST RDS dataset. The NIST RDSv3 is distributed as four separate SQLite databases.
+
+The "Modern" dataset is the largest component because it includes full file paths in its metadata. Table 4 shows the difference between the compressed download size and the actual space needed on disk after extraction.
+
+
+\begin{table}[H]
+\centering
+\begin{tabular}{l r r} % Changed from tabularx to tabular, and X to l
+\toprule
+\textbf{Dataset Component} & \textbf{Download Size (ZIP)} & \textbf{Uncompressed Size (SQLite)} \\
+\midrule
+Modern PC (Full) & 119 GB & $\sim$350 GB \\
+Legacy PC (Full) & $\sim$35 GB & $\sim$100 GB \\
+Android (Full) & $\sim$15 GB & $\sim$35 GB \\
+iOS (Full) & $\sim$5 GB & $\sim$15 GB \\
+\midrule
+\textbf{Total Staging Storage} & \textbf{$\sim$174 GB} & \textbf{$\sim$500 GB} \\
+\bottomrule
+\end{tabular}
+\caption{Storage requirements for the raw NIST input artifacts.}
+\end{table}
+
+
+\textbf{Observation:} We need to ensure the staging server has at least \textbf{500 GB} of free space to hold these uncompressed databases during the migration process.
+
+\subsection{Estimating the Final RocksDB Size}
+We calculated the final database size by looking at the data density from our pilot test. RocksDB uses LSM-Trees (Log-Structured Merge-Trees) and compression algorithms like Snappy or LZ4, which makes it much more space-efficient than the standard SQLite B-Trees used in the source data.
+
+\subsubsection{Scaling Factors}
+\begin{itemize}
+    \item \textbf{Pilot Data Density:} In our test, $1,911,244$ keys took up $308.69$ MB.
+    \[ \text{Average size per key} = \frac{308.69 \text{ MB}}{1,911,244 \text{ keys}} \approx 161.5 \text{ bytes/key} \]
+    \item \textbf{Total Production Keys:} We estimate $\sim$162,000,000 distinct SHA-256 hashes across all datasets.
+\end{itemize}
+
+\subsubsection{Projected Database Size}
+Using the average size per key, we can estimate the total size:
+\[ \text{Total Size} = 162,000,000 \text{ keys} \times 161.5 \text{ bytes} \approx 26.16 \text{ GB} \]
+
+\textbf{Result:} The final application database will likely take up between \textbf{26 GB and 30 GB}. This is a significant reduction ($\sim$94\%) compared to the 500 GB raw source data.
+
+\subsection{Bloom Filter Analysis}
+To improve lookup speeds, we use a Bloom filter. This allows the system to instantly know if a file hash \textit{does not} exist in the database without reading from the disk.
+
+\subsubsection{Size Calculation}
+\begin{itemize}
+    \item \textbf{Configuration:} We allocated 10 bits per key, which gives a False Positive Rate of about 1\%.
+    \item \textbf{Key Count ($n$):} 162,000,000
+\end{itemize}
+
+\[ \text{Size (bits)} = 162,000,000 \times 10 = 1,620,000,000 \text{ bits} \]
+\[ \text{Size (bytes)} = \frac{1,620,000,000}{8} \approx 202.5 \text{ MB} \]
+
+\textbf{Impact:}
+The Bloom filter adds about 200 MB to the storage size. More importantly, it requires \textbf{200 MB of RAM} to be kept in memory at all times.
+
+\subsection{Migration Performance (ETL)}
+The migration process involves reading roughly 1.3 billion rows from SQLite, converting them to JSON, and writing the unique keys to RocksDB. The main bottleneck will be the read speed of the SQLite source files.
+
+\subsubsection{Resource Estimates}
+\begin{table}[H]
+\centering
+% 'l' = left aligned, 'p{9cm}' = paragraph column that wraps text to 9cm wide
+\begin{tabular}{l l p{9cm}} 
+\toprule
+\textbf{Metric} & \textbf{Estimate} & \textbf{Basis of Calculation} \\
+\midrule
+\textbf{Time Required} & 4 -- 6 Hours & Assumes reading 50k--80k rows/second. \\
+\midrule
+\textbf{Processing Load} & High CPU & JSON serialization requires significant CPU power (est. 8 cores). \\
+\midrule
+\textbf{Memory Usage} & High RAM & Large buffers are needed to sort keys before bulk insertion (est. 16 GB RAM). \\
+\bottomrule
+\end{tabular}
+\caption{Estimated resource consumption for the migration process.}
+\end{table}
+
+\subsection{Hardware Recommendations}
+To maintain the performance we saw in the pilot ($>$16,000 queries per second), we recommend the following hardware configurations.
+
+\subsubsection{Minimum Setup (Functional)}
+\textit{Good for development or low-traffic testing.}
+\begin{itemize}
+    \item \textbf{CPU:} 2 Cores.
+    \item \textbf{Memory:} 4 GB (Enough for the Bloom Filter + OS cache).
+    \item \textbf{Storage:} 50 GB SSD.
+\end{itemize}
+
+\subsubsection{Ideal Setup (High Performance)}
+\textit{Recommended for the final submission/deployment.}
+\begin{itemize}
+    \item \textbf{CPU:} 8 Cores (To handle parallel JSON processing).
+    \item \textbf{Memory:} \textbf{64 GB}.
+    \begin{itemize}
+        \item \textit{Reasoning:} Since the database is only $\sim$30 GB, having 64 GB of RAM allows us to load the \textit{entire} database into memory (using `block\_cache`). This eliminates disk reads for lookups and could push performance over \textbf{100,000 queries per second}.
+    \end{itemize}
+    \item \textbf{Storage:} 500 GB NVMe SSD.
+    \begin{itemize}
+        \item \textit{Reasoning:} We need the space to download and load the RocksDB database.
+    \end{itemize}
+\end{itemize}
+
+%\section{Appendixes}
+
+\end{document}

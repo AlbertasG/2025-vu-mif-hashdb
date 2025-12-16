@@ -2,7 +2,13 @@
 
 A high-performance hash lookup tool using RocksDB with Bloom filters for fast file identification against the NIST Reference Data Set (RDS).
 
+## Cloning without data sample
+
+cloning the repository with also download 1GB+++ dataset, if you want to skip and only download source code / documentation / latex report use the following command
+`GIT_LFS_SKIP_SMUDGE=1 git clone git@github.com:AlbertasG/2025-vu-mif-hashdb.git`
+
 ## Overview
+
 
 This tool provides two main components:
 
@@ -40,6 +46,8 @@ export CGO_LDFLAGS="-L/opt/homebrew/lib -lrocksdb -lstdc++ -lm -lz -lbz2 -lsnapp
 ```
 
 ### 3. Source Data
+
+The TEST dataset used as subset from NIST RDS v3 database in this repository is stored with git-lfs, so you have to install git lfs extension on your machine if you want to pull the data via git. 
 
 Ensure you have the SQLite database at `data/nist_rds_subset.db` containing the NIST RDS data with the following tables:
 - `FILE` - File hashes and metadata
