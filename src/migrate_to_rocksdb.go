@@ -29,7 +29,7 @@ type FileData struct {
 
 func main() {
 	// Open SQLite
-	sqliteDB, err := sql.Open("sqlite3", "data/nist_rds_subset.db")
+	sqliteDB, err := sql.Open("sqlite3", "../data/nist_rds_subset.db")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func main() {
 	bbto.SetCacheIndexAndFilterBlocks(true)
 	opts.SetBlockBasedTableFactory(bbto)
 
-	rocksDB, err := grocksdb.OpenDb(opts, "data/nist_rds_rocksdb")
+	rocksDB, err := grocksdb.OpenDb(opts, "../data/nist_rds_rocksdb")
 	if err != nil {
 		log.Fatal(err)
 	}

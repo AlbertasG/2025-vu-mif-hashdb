@@ -47,7 +47,7 @@ func main() {
 	bbto.SetFilterPolicy(grocksdb.NewBloomFilter(10))
 	opts.SetBlockBasedTableFactory(bbto)
 
-	db, err := grocksdb.OpenDbForReadOnly(opts, "data/nist_rds_rocksdb", false)
+	db, err := grocksdb.OpenDbForReadOnly(opts, "../data/nist_rds_rocksdb", false)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

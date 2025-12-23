@@ -53,7 +53,7 @@ func printRocksDBMemoryStats() {
 	bbto.SetCacheIndexAndFilterBlocks(true)
 	opts.SetBlockBasedTableFactory(bbto)
 
-	db, err := grocksdb.OpenDbForReadOnly(opts, "data/nist_rds_rocksdb", false)
+	db, err := grocksdb.OpenDbForReadOnly(opts, "../data/nist_rds_rocksdb", false)
 	if err != nil {
 		fmt.Printf("Could not open DB for stats: %v\n\n", err)
 		return
@@ -164,7 +164,7 @@ type TestHash struct {
 }
 
 func generateTestHashes(count int) []TestHash {
-	sqliteDB, err := sql.Open("sqlite3", "data/nist_rds_subset.db")
+	sqliteDB, err := sql.Open("sqlite3", "../data/nist_rds_subset.db")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -228,7 +228,7 @@ func generateRandomHash(length int) string {
 }
 
 func benchmarkSQLite(testHashes []TestHash) BenchmarkResult {
-	sqliteDB, err := sql.Open("sqlite3", "data/nist_rds_subset.db")
+	sqliteDB, err := sql.Open("sqlite3", "../data/nist_rds_subset.db")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -323,7 +323,7 @@ func benchmarkRocksDBGet(testHashes []TestHash, useBloomFilter bool) BenchmarkRe
 		name = "RocksDB WITHOUT Bloom filter"
 	}
 
-	db, err := grocksdb.OpenDbForReadOnly(opts, "data/nist_rds_rocksdb", false)
+	db, err := grocksdb.OpenDbForReadOnly(opts, "../data/nist_rds_rocksdb", false)
 	if err != nil {
 		log.Fatal(err)
 	}

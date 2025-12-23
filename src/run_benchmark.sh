@@ -29,16 +29,16 @@ echo "╚═══════════════════════�
 echo ""
 
 # Check if RocksDB exists
-if [ ! -d "data/nist_rds_rocksdb" ]; then
-    echo "❌ Error: RocksDB not found at data/nist_rds_rocksdb"
+if [ ! -d "../data/nist_rds_rocksdb" ]; then
+    echo "❌ Error: RocksDB not found at ../data/nist_rds_rocksdb"
     echo "Please run the migration first:"
     echo "  go run migrate_to_rocksdb.go"
     exit 1
 fi
 
 # Check if SQLite exists
-if [ ! -f "data/nist_rds_subset.db" ]; then
-    echo "❌ Error: SQLite database not found at data/nist_rds_subset.db"
+if [ ! -f "../data/nist_rds_subset.db" ]; then
+    echo "❌ Error: SQLite database not found at ../data/nist_rds_subset.db"
     exit 1
 fi
 
